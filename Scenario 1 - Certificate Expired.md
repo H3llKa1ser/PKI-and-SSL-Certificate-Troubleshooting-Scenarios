@@ -53,5 +53,7 @@ Apache2
 ## Prevention
 
 □ Set up monitoring alerts at 30, 14, 7 days before expiry
+
 □ Use automated renewal (certbot, cert-manager)
+
 □ Use short-lived certs (90 days) — forces automation
