@@ -1,5 +1,15 @@
 # Scenario 1 - Certificate Expired
 
+## Symptom
+
+Users report: 
+
+    "Your connection is not private"
+
+Browser shows: 
+
+    NET::ERR_CERT_DATE_INVALID
+
 ## Diagnostics
 
 ### 1) Check certificate dates
