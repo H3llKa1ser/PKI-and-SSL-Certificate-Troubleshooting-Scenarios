@@ -1,4 +1,4 @@
-# Scenario 54 - ertificate Generated with Wrong Key Usage Extensions.md
+# Scenario 54 - Certificate Generated with Wrong Key Usage Extensions.md
 
 ## Symptom
 
