@@ -313,3 +313,8 @@ Here you will find playbooks that will assist you with troubleshooting your PKI 
 | `SSL handshake failed`                   | Nginx         | Various (see logs/context)            | Check logs for specific cause                 |
 | `unable to get local issuer certificate` | curl/Nginx    | Incomplete certificate chain          | Serve `fullchain.crt`                         |
 
+# Resource to train/test
+
+### 1) badssl.com
+
+    https://badssl.com/
