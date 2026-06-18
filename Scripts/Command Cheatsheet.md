@@ -1,3 +1,5 @@
+# Command Cheatsheet
+
 # ── INSPECTION ──
     openssl x509 -in cert.crt -text -noout              # Read certificate
     openssl x509 -in cert.crt -noout -dates             # Check expiry
