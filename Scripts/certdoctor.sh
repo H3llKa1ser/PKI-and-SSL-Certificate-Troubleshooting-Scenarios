@@ -11,8 +11,8 @@
 #   ./certdoctor.sh <host[:port]> [host2[:port]] ...        # remote check(s)
 #   ./certdoctor.sh --file cert.pem [--key key.pem] [--ca ca.pem]  # local files
 #   ./certdoctor.sh --list hosts.txt                        # batch from file
-#   ./certdoctor.sh --json <host>                           # JSON output
 #   ./certdoctor.sh --quiet <host>                          # only warnings/errors
+#   ./certdoctor.sh --summary-only <host>                   # only final summary
 #
 # Exit codes: 0=all OK, 1=warnings, 2=critical/errors, 3=usage error
 ###############################################################################
@@ -39,16 +39,29 @@ fi
 EXIT_CODE=0
 QUIET=0
 JSON=0
+SUMMARY_ONLY=0
+ISSUES_CRIT=()
+ISSUES_WARN=()
+CURRENT_HOST=""
 TMPDIR_C="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_C"' EXIT
 
 # ─── Output helpers ──────────────────────────────────────────────────────────
-ok()    { [[ $QUIET -eq 0 ]] && printf "  ${GRN}✅ %s${RST}\n" "$*"; }
-warn()  { printf "  ${YEL}⚠️  %s${RST}\n" "$*"; (( EXIT_CODE < 1 )) && EXIT_CODE=1; }
-err()   { printf "  ${RED}❌ %s${RST}\n" "$*"; EXIT_CODE=2; }
-info()  { [[ $QUIET -eq 0 ]] && printf "  ${CYN}ℹ️  %s${RST}\n" "$*"; }
-hdr()   { [[ $QUIET -eq 0 ]] && printf "\n${BOLD}${BLU}%s${RST}\n" "$*"; }
-sub()   { [[ $QUIET -eq 0 ]] && printf "${BOLD}— %s${RST}\n" "$*"; }
+# SUMMARY_ONLY suppresses live output but still collects issues for the summary.
+ok()    { (( QUIET==0 && SUMMARY_ONLY==0 )) && printf "  ${GRN}✅ %s${RST}\n" "$*"; }
+warn()  {
+  (( SUMMARY_ONLY==0 )) && printf "  ${YEL}⚠️  %s${RST}\n" "$*"
+  ISSUES_WARN+=("${CURRENT_HOST:+[$CURRENT_HOST] }$*")
+  (( EXIT_CODE < 1 )) && EXIT_CODE=1
+}
+err()   {
+  (( SUMMARY_ONLY==0 )) && printf "  ${RED}❌ %s${RST}\n" "$*"
+  ISSUES_CRIT+=("${CURRENT_HOST:+[$CURRENT_HOST] }$*")
+  EXIT_CODE=2
+}
+info()  { (( QUIET==0 && SUMMARY_ONLY==0 )) && printf "  ${CYN}ℹ️  %s${RST}\n" "$*"; }
+hdr()   { (( QUIET==0 && SUMMARY_ONLY==0 )) && printf "\n${BOLD}${BLU}%s${RST}\n" "$*"; }
+sub()   { (( QUIET==0 && SUMMARY_ONLY==0 )) && printf "${BOLD}— %s${RST}\n" "$*"; }
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing required tool: $1"; exit 3; }; }
 need openssl
@@ -243,7 +256,6 @@ check_trust() {
   if grep -q ": OK" <<<"$result"; then
     ok "Chain verifies against trust store"
   else
-    local code; code=$(grep -oE "error [0-9]+" <<<"$result" | head -1)
     err "Chain verification FAILED: $result"
     case "$result" in
       *"unable to get local issuer"*) info "→ error 20: missing intermediate. Serve full chain." ;;
@@ -281,9 +293,10 @@ check_key_perms() {
   [[ -f "$key" ]] || return
   local perms
   perms=$(stat -c "%a" "$key" 2>/dev/null || stat -f "%Lp" "$key" 2>/dev/null)
-  if [[ "$perms" =~ ^[0-7]?[0-7][04]?$ ]] && [[ "${perms: -2:1}" =~ [4-7] || "${perms: -1}" =~ [1-7] ]]; then
-    # crude check: if group/other have any bits
-    if [[ "${perms: -2}" != "00" && "${perms: -1}" != "0" ]] && [[ "$perms" != "600" && "$perms" != "400" ]]; then
+  if [[ "$perms" != "600" && "$perms" != "400" ]]; then
+    # check if group/other have any access bits
+    local go="${perms: -2}"
+    if [[ "$go" != "00" ]]; then
       warn "Private key permissions are $perms — should be 600 or 400"
     else
       ok "Private key permissions: $perms"
@@ -308,7 +321,7 @@ check_tls_live() {
   local host="$1" port="$2"
 
   sub "TLS protocol support"
-  local v proto_ok
+  local v
   for v in 1_2 1_3; do
     if echo | timeout "$TIMEOUT" openssl s_client -connect "${host}:${port}" \
          -servername "$host" -tls$v 2>/dev/null | grep -q "Cipher is"; then
@@ -374,6 +387,7 @@ diagnose_host() {
   local host="${target%%:*}"
   local port="${target##*:}"
   [[ "$host" == "$port" ]] && port=443
+  CURRENT_HOST="${host}:${port}"
 
   hdr "════════════════════════════════════════════════════════════"
   hdr "🔬 DIAGNOSING: ${host}:${port}"
@@ -439,6 +453,7 @@ diagnose_host() {
 # ─── Run checks against local files ──────────────────────────────────────────
 diagnose_files() {
   local cert="$1" key="${2:-}" ca="${3:-}"
+  CURRENT_HOST="$(basename "$cert")"
 
   hdr "════════════════════════════════════════════════════════════"
   hdr "🔬 DIAGNOSING LOCAL FILES"
@@ -480,13 +495,40 @@ diagnose_files() {
 
 # ─── Print summary ───────────────────────────────────────────────────────────
 print_summary() {
-  hdr "════════════════════════════════════════════════════════════"
+  # Always-print helpers (bypass SUMMARY_ONLY/QUIET suppression)
+  local SEP="════════════════════════════════════════════════════════════"
+  local THIN="────────────────────────────────────────────────────────────"
+
+  printf "\n${BOLD}${BLU}%s${RST}\n" "$SEP"
+  printf "${BOLD}${BLU}📋 SUMMARY${RST}\n"
+  printf "${BOLD}${BLU}%s${RST}\n" "$SEP"
+
+  local n_crit=${#ISSUES_CRIT[@]}
+  local n_warn=${#ISSUES_WARN[@]}
+
+  if (( n_crit > 0 )); then
+    printf "\n${RED}${BOLD}❌ CRITICAL ISSUES (%d):${RST}\n" "$n_crit"
+    local i
+    for i in "${ISSUES_CRIT[@]}"; do
+      printf "   ${RED}•${RST} %s\n" "$i"
+    done
+  fi
+
+  if (( n_warn > 0 )); then
+    printf "\n${YEL}${BOLD}⚠️  WARNINGS (%d):${RST}\n" "$n_warn"
+    local i
+    for i in "${ISSUES_WARN[@]}"; do
+      printf "   ${YEL}•${RST} %s\n" "$i"
+    done
+  fi
+
+  printf "\n${BOLD}${BLU}%s${RST}\n" "$THIN"
   case $EXIT_CODE in
-    0) printf "${GRN}${BOLD}  ✅ ALL CHECKS PASSED${RST}\n" ;;
-    1) printf "${YEL}${BOLD}  ⚠️  COMPLETED WITH WARNINGS${RST}\n" ;;
-    2) printf "${RED}${BOLD}  ❌ CRITICAL ISSUES FOUND${RST}\n" ;;
+    0) printf "${GRN}${BOLD}  ✅ ALL CHECKS PASSED — no issues found${RST}\n" ;;
+    1) printf "${YEL}${BOLD}  ⚠️  COMPLETED WITH %d WARNING(S)${RST}\n" "$n_warn" ;;
+    2) printf "${RED}${BOLD}  ❌ FAILED: %d CRITICAL, %d WARNING(S)${RST}\n" "$n_crit" "$n_warn" ;;
   esac
-  hdr "════════════════════════════════════════════════════════════"
+  printf "${BOLD}${BLU}%s${RST}\n" "$SEP"
 }
 
 # ─── Usage ───────────────────────────────────────────────────────────────────
@@ -498,7 +540,8 @@ USAGE:
   $0 <host[:port]> [more hosts...]      Check live host(s) (default port 443)
   $0 --file <cert> [--key <key>] [--ca <ca>]   Check local files
   $0 --list <file>                      Batch check hosts from file (one per line)
-  $0 --quiet <host>                     Only show warnings/errors
+  $0 --quiet <host>                     Only show warnings/errors (inline)
+  $0 --summary-only <host>              Suppress scan; show ONLY final summary
   $0 -h | --help                        Show this help
 
 ENV VARS:
@@ -509,6 +552,7 @@ EXAMPLES:
   $0 example.com:8443 api.example.com
   $0 --file server.crt --key server.key --ca ca-bundle.crt
   $0 --list hosts.txt
+  $0 --summary-only --list hosts.txt
   WARN_DAYS=60 $0 example.com
 
 EXIT CODES: 0=OK  1=warnings  2=critical  3=usage error
@@ -524,26 +568,27 @@ HOSTS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -h|--help) usage; exit 0 ;;
-    --quiet)   QUIET=1; shift ;;
-    --json)    JSON=1; shift ;;
-    --file)    MODE="file"; CERT="$2"; shift 2 ;;
-    --key)     KEY="$2"; shift 2 ;;
-    --ca)      CA="$2"; shift 2 ;;
-    --list)    MODE="list"; LISTFILE="$2"; shift 2 ;;
-    -*)        echo "Unknown option: $1"; usage; exit 3 ;;
-    *)         HOSTS+=("$1"); shift ;;
+    -h|--help)       usage; exit 0 ;;
+    --quiet)         QUIET=1; shift ;;
+    --summary-only)  SUMMARY_ONLY=1; shift ;;
+    --json)          JSON=1; shift ;;
+    --file)          MODE="file"; CERT="$2"; shift 2 ;;
+    --key)           KEY="$2"; shift 2 ;;
+    --ca)            CA="$2"; shift 2 ;;
+    --list)          MODE="list"; LISTFILE="$2"; shift 2 ;;
+    -*)              echo "Unknown option: $1"; usage; exit 3 ;;
+    *)               HOSTS+=("$1"); shift ;;
   esac
 done
 
 # ─── Dispatch ────────────────────────────────────────────────────────────────
 case "$MODE" in
   file)
-    [[ -f "$CERT" ]] || { err "Cert file not found: $CERT"; exit 3; }
+    [[ -f "$CERT" ]] || { echo "Cert file not found: $CERT"; exit 3; }
     diagnose_files "$CERT" "$KEY" "$CA"
     ;;
   list)
-    [[ -f "$LISTFILE" ]] || { err "List file not found: $LISTFILE"; exit 3; }
+    [[ -f "$LISTFILE" ]] || { echo "List file not found: $LISTFILE"; exit 3; }
     while IFS= read -r line; do
       line="$(echo "$line" | tr -d '[:space:]')"
       [[ -z "$line" || "$line" == \#* ]] && continue
